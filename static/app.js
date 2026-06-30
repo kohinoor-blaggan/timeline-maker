@@ -196,7 +196,9 @@ function render() {
         'clip-path':'inset(0)'
       }));
     }
-    g.addEventListener('click', ev => { ev.stopPropagation(); openEditPanel(e.id); });
+    const barCenterX = cx1 + w / 2;
+    const barCenterY = barY + PERIOD_H / 2;
+    g.addEventListener('click', ev => { ev.stopPropagation(); openInfoBubble(e.id, barCenterX, barCenterY); });
     gPeriod.appendChild(g);
   }
 
@@ -221,6 +223,14 @@ function render() {
 
     const g = mkEl('g', { style:'cursor:pointer' });
 
+    // Invisible hit area covering dot + stem + label
+    const hitTop    = Math.min(labelY - 14, lineY2 - 2);
+    const hitBottom = Math.max(labelY + 4,  dotY   + 7);
+    g.appendChild(mkEl('rect', {
+      x: x - 32, y: hitTop, width: 64, height: hitBottom - hitTop,
+      fill: 'transparent', stroke: 'none'
+    }));
+
     // Dashed stem
     g.appendChild(mkEl('line', {
       x1:x, y1:lineY1, x2:x, y2:lineY2,
@@ -244,7 +254,7 @@ function render() {
       style:'pointer-events:none'
     }));
 
-    g.addEventListener('click', ev => { ev.stopPropagation(); openEditPanel(e.id); });
+    g.addEventListener('click', ev => { ev.stopPropagation(); openInfoBubble(e.id, x, dotY); });
     gPoint.appendChild(g);
   });
 
@@ -327,12 +337,69 @@ function initSVG() {
     if (svgEl) svgEl.style.cursor = 'grab';
   });
 
-  // Click on SVG background → close panel
-  svgEl.addEventListener('click', () => closePanel());
+  // Click on SVG background → close panel and bubble
+  svgEl.addEventListener('click', () => { closePanel(); closeInfoBubble(); });
 
   // ResizeObserver fires when ctnEl itself changes size (e.g. panel open/close),
   // unlike window.resize which only fires on browser-window resize.
   new ResizeObserver(() => render()).observe(ctnEl);
+}
+
+// ── Info bubble ────────────────────────────────────────────────────────────
+let infoBubbleEventId = null;
+
+function formatDate(dateStr) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('en-US', {
+    year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC'
+  });
+}
+
+function openInfoBubble(id, svgX, svgY) {
+  const e = eventsCache[id];
+  if (!e) return;
+  infoBubbleEventId = id;
+
+  document.getElementById('info-title').textContent = e.title;
+  document.getElementById('bubble-accent').style.background = e.color || '#1d4ed8';
+  document.getElementById('info-desc').textContent = e.description || '';
+
+  const dateEl = document.getElementById('info-date');
+  if (e.type === 'period' && e.end_date) {
+    dateEl.textContent = `${formatDate(e.start_date)} – ${formatDate(e.end_date)}`;
+  } else {
+    dateEl.textContent = formatDate(e.start_date);
+  }
+
+  const bubble = document.getElementById('event-info-bubble');
+  // Show offscreen first so we can measure its size
+  bubble.style.left = '-9999px';
+  bubble.style.top  = '-9999px';
+  bubble.style.display = 'block';
+
+  const bW = bubble.offsetWidth;
+  const bH = bubble.offsetHeight;
+  const cW = ctnEl.clientWidth;
+  const cH = ctnEl.clientHeight;
+  const PAD = 10;
+
+  // Center on event, then clamp so it stays inside the canvas
+  let left = Math.round(Math.max(PAD + bW / 2, Math.min(svgX, cW - PAD - bW / 2)));
+  let top  = Math.round(Math.max(PAD + bH / 2, Math.min(svgY, cH - PAD - bH / 2)));
+
+  bubble.style.left = left + 'px';
+  bubble.style.top  = top  + 'px';
+}
+
+function closeInfoBubble() {
+  document.getElementById('event-info-bubble').style.display = 'none';
+  infoBubbleEventId = null;
+}
+
+function openEditFromBubble() {
+  const id = infoBubbleEventId;
+  closeInfoBubble();
+  if (id !== null) openEditPanel(id);
 }
 
 // ── Panel management ───────────────────────────────────────────────────────
