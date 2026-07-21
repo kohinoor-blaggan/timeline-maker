@@ -1,3 +1,4 @@
+import os
 import sqlite3
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, abort
 import db
@@ -117,4 +118,5 @@ def delete_event(event_id):
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    debug = os.getenv("FLASK_DEBUG", "1") == "1"
+    app.run(debug=debug, host="0.0.0.0", port=int(os.getenv("PORT", 5051)))
