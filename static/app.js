@@ -5,6 +5,7 @@ let allEvents = [];
 let eventsCache = {};
 let currentEventId = null;
 let currentEventType = 'point';
+let lastUsedColor = '#1d4ed8';
 
 // View state
 let pxPerDay = 3;
@@ -48,6 +49,24 @@ function contrastColor(hex) {
 }
 function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── Zoom helpers ───────────────────────────────────────────────────────────
+const PX_MIN = 0.001, PX_MAX = 300;
+const LOG_RANGE = Math.log10(PX_MAX / PX_MIN);
+
+function pxToSlider(ppd) {
+  return Math.round((Math.log10(ppd) - Math.log10(PX_MIN)) / LOG_RANGE * 100);
+}
+function sliderToPx(v) {
+  return PX_MIN * Math.pow(PX_MAX / PX_MIN, v / 100);
+}
+function adjustZoom(factor) {
+  const W = ctnEl.clientWidth;
+  const centerMs = xToMs(W / 2);
+  pxPerDay = Math.max(PX_MIN, Math.min(PX_MAX, pxPerDay * factor));
+  viewStartMs = centerMs - (W / 2) / pxPerDay * DAY_MS;
+  render();
 }
 
 // ── Tick generation ────────────────────────────────────────────────────────
@@ -130,8 +149,9 @@ function render() {
   const startMs = viewStartMs;
   const endMs   = xToMs(W);
 
-  // Painter layers
+  // Painter layers (gStem sits behind gPeriod so dashed lines don't overdraw bars)
   const gGrid   = mkEl('g', {}); svgEl.appendChild(gGrid);
+  const gStem   = mkEl('g', {}); svgEl.appendChild(gStem);
   const gPeriod = mkEl('g', {}); svgEl.appendChild(gPeriod);
   const gAxis   = mkEl('g', {}); svgEl.appendChild(gAxis);
   const gPoint  = mkEl('g', {}); svgEl.appendChild(gPoint);
@@ -170,7 +190,14 @@ function render() {
   }
 
   // ── Period events (below axis) ──
+  // Compute lanes for all periods up front so point stems can clear them.
   const periods = assignLanes(allEvents.filter(e => e.type === 'period'));
+  const numPeriodLanes = periods.length > 0 ? Math.max(...periods.map(p => p.lane)) + 1 : 0;
+  // Stem length for below-axis points: long enough that the label clears the lowest period bar.
+  const belowStem = numPeriodLanes > 0
+    ? PERIOD_OFFSET + numPeriodLanes * (PERIOD_H + PERIOD_GAP) + 20
+    : BELOW_STEM;
+
   for (const e of periods) {
     const x1 = msToX(dms(e.start_date));
     const x2 = msToX(dms(e.end_date));
@@ -202,24 +229,44 @@ function render() {
     gPeriod.appendChild(g);
   }
 
-  // ── Point events (above/below axis, alternating) ──
+  // ── Point events ──
   const points = [...allEvents.filter(e => e.type === 'point')]
     .sort((a,b) => dms(a.start_date) - dms(b.start_date));
+
+  // Greedy proximity-based slot assignment so labels don't overlap at any zoom level.
+  // Slots 0-2 go above the axis at increasing heights; slot 3 goes below.
+  const placed = []; // { x, halfW, slotIdx }
+  const pointSlots = points.map(e => {
+    const x = msToX(dms(e.start_date));
+    const halfW = Math.max(28, e.title.length * 3.2);
+    const blocked = new Set(
+      placed.filter(p => Math.abs(p.x - x) < p.halfW + halfW + 6).map(p => p.slotIdx)
+    );
+    let slotIdx = 0;
+    while (blocked.has(slotIdx) && slotIdx < 3) slotIdx++;
+    placed.push({ x, halfW, slotIdx });
+    return slotIdx;
+  });
 
   points.forEach((e, i) => {
     const x = Math.round(msToX(dms(e.start_date)));
     if (x < -100 || x > W + 100) return;
 
-    // Every 4th event dips below; the rest alternate through 3 stem heights above
-    const posInGroup = i % 4;
-    const below   = posInGroup === 3;
-    const stemLen = below ? BELOW_STEM : POINT_STEMS[posInGroup];
+    const slotIdx = pointSlots[i];
+    const below   = slotIdx === 3;
+    const stemLen = below ? belowStem : POINT_STEMS[slotIdx];
 
-    const dotY     = axisY;
-    const lineY1   = below ? dotY + 5 : dotY - 5;
-    const lineY2   = below ? dotY + stemLen : dotY - stemLen;
-    const labelY   = below ? lineY2 + 14 : lineY2 - 8;
-    const anchor   = 'middle';
+    const dotY   = axisY;
+    const lineY1 = below ? dotY + 5  : dotY - 5;
+    const lineY2 = below ? dotY + stemLen : dotY - stemLen;
+    const labelY = below ? lineY2 + 14 : lineY2 - 8;
+
+    // Dashed stem goes behind period bars
+    gStem.appendChild(mkEl('line', {
+      x1:x, y1:lineY1, x2:x, y2:lineY2,
+      stroke:e.color, 'stroke-width':'1.5',
+      'stroke-dasharray':'3,3', opacity:'0.8'
+    }));
 
     const g = mkEl('g', { style:'cursor:pointer' });
 
@@ -231,13 +278,6 @@ function render() {
       fill: 'transparent', stroke: 'none'
     }));
 
-    // Dashed stem
-    g.appendChild(mkEl('line', {
-      x1:x, y1:lineY1, x2:x, y2:lineY2,
-      stroke:e.color, 'stroke-width':'1.5',
-      'stroke-dasharray':'3,3', opacity:'0.8'
-    }));
-
     // Dot on axis
     g.appendChild(mkEl('circle', {
       cx:x, cy:dotY, r:'5',
@@ -247,7 +287,7 @@ function render() {
     // Label (drawn in label layer so it sits on top of everything)
     gLabel.appendChild(mkTxt(e.title, {
       x, y:labelY,
-      'text-anchor':anchor,
+      'text-anchor':'middle',
       fill:e.color,
       'font-size':'11', 'font-weight':'600',
       'font-family':'system-ui,sans-serif',
@@ -266,6 +306,10 @@ function render() {
       'font-size':'14', 'font-family':'system-ui,sans-serif'
     }));
   }
+
+  // Sync zoom slider
+  const zSlider = document.getElementById('zoom-slider');
+  if (zSlider) zSlider.value = pxToSlider(pxPerDay);
 }
 
 // ── Fit view to event range ────────────────────────────────────────────────
@@ -284,8 +328,8 @@ function fitView() {
   const maxMs = Math.max(...dates);
   const range = Math.max(maxMs - minMs, 30 * DAY_MS);
   const pad   = range * 0.18;
-  pxPerDay    = W / ((range + 2 * pad) / DAY_MS);
-  viewStartMs = minMs - pad;
+  pxPerDay    = W / ((range + 2 * pad) / DAY_MS) * 1.3;
+  viewStartMs = minMs - pad - (pad * 0.3 / 2); // re-center after zoom
 }
 
 // ── Load events ────────────────────────────────────────────────────────────
@@ -411,7 +455,7 @@ function openAddPanel() {
   document.getElementById('f-desc').value  = '';
   document.getElementById('f-start').value = '';
   document.getElementById('f-end').value   = '';
-  setColorValue('#1d4ed8');
+  setColorValue(lastUsedColor);
   setEventType('point');
   clearPanelError();
   document.getElementById('event-panel').classList.add('open');
@@ -494,6 +538,7 @@ async function saveEvent() {
   }
   const data = await res.json();
   if (data.error) { showPanelError(data.error); return; }
+  lastUsedColor = color;
   closePanel();
   await loadEvents(true);
 }
@@ -539,6 +584,23 @@ document.addEventListener('DOMContentLoaded', () => {
       document.getElementById('color-hex').textContent = colorInput.value;
     });
   }
+
+  const zoomSlider = document.getElementById('zoom-slider');
+  if (zoomSlider) {
+    zoomSlider.addEventListener('input', () => {
+      const W = ctnEl.clientWidth;
+      const centerMs = xToMs(W / 2);
+      pxPerDay = sliderToPx(Number(zoomSlider.value));
+      viewStartMs = centerMs - (W / 2) / pxPerDay * DAY_MS;
+      render();
+    });
+    // Prevent drag-pan from starting when the user grabs the slider
+    zoomSlider.addEventListener('mousedown', ev => ev.stopPropagation());
+  }
+
+  const zoomBar = document.getElementById('zoom-bar');
+  if (zoomBar) zoomBar.addEventListener('mousedown', ev => ev.stopPropagation());
+
   initSVG();
   loadEvents(false);
 });

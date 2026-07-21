@@ -109,6 +109,46 @@
     border-radius: 4px;
   }
 
+  /* Zoom bar */
+  #zoom-bar {
+    position: absolute;
+    bottom: 14px;
+    left: 16px;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    background: rgba(255,255,255,0.92);
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    padding: 4px 8px;
+    box-shadow: 0 2px 8px rgba(0,0,0,.08);
+    z-index: 10;
+    user-select: none;
+  }
+  .zoom-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 1rem;
+    color: #64748b;
+    padding: 0 2px;
+    line-height: 1;
+    margin: 0;
+    width: 20px;
+    height: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 3px;
+  }
+  .zoom-btn:hover { background: #f1f5f9; color: #1e293b; }
+  #zoom-slider {
+    width: 90px;
+    accent-color: #1d4ed8;
+    cursor: pointer;
+    margin: 0;
+  }
+
   /* Event info bubble */
   #event-info-bubble {
     display: none;
@@ -192,6 +232,12 @@
       <button class="outline toolbar-btn" style="color:#ef4444; border-color:#fca5a5" onclick="deleteThisTimeline()">🗑 Delete</button>
     </div>
     <div id="vis-container">
+      <!-- Zoom bar -->
+      <div id="zoom-bar">
+        <button class="zoom-btn" onclick="adjustZoom(1/1.3)" title="Zoom out">−</button>
+        <input type="range" id="zoom-slider" min="0" max="100" step="1" title="Zoom">
+        <button class="zoom-btn" onclick="adjustZoom(1.3)" title="Zoom in">+</button>
+      </div>
       <!-- Event info bubble (positioned by JS) -->
       <div id="event-info-bubble">
         <div class="bubble-accent" id="bubble-accent"></div>
