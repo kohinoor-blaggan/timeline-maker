@@ -5,6 +5,7 @@ let allEvents = [];
 let eventsCache = {};
 let currentEventId = null;
 let currentEventType = 'point';
+let lastUsedColor = '#1d4ed8';
 
 // View state
 let pxPerDay = 3;
@@ -16,12 +17,17 @@ let svgEl = null, ctnEl = null;
 // Layout constants
 const DAY_MS          = 86400000;
 const AXIS_RATIO      = 0.40;   // center line at 40% of container height
-const POINT_STEMS     = [50, 80, 110]; // stem lengths above axis (cycles 0,1,2)
-const BELOW_STEM      = 48;     // stem length for below-axis points (every 4th)
 const PERIOD_H        = 24;     // period bar height
 const PERIOD_GAP      = 5;      // vertical gap between period lanes
 const PERIOD_OFFSET   = 38;     // gap between axis and first period lane
 const SVGNS           = 'http://www.w3.org/2000/svg';
+
+// Point-label layout
+const LABEL_FONT      = '600 11px system-ui, sans-serif';
+const FIRST_STEM      = 46;     // stem length of the level nearest the axis
+const LEVEL_STEP      = 24;     // vertical distance between adjacent levels
+const LABEL_PAD       = 10;     // min horizontal gap between neighbouring labels
+const EDGE_MARGIN     = 22;     // keep the furthest level inside the canvas
 
 // ── Date utilities ─────────────────────────────────────────────────────────
 function dms(dateStr) {
@@ -48,6 +54,24 @@ function contrastColor(hex) {
 }
 function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── Zoom helpers ───────────────────────────────────────────────────────────
+const PX_MIN = 0.001, PX_MAX = 300;
+const LOG_RANGE = Math.log10(PX_MAX / PX_MIN);
+
+function pxToSlider(ppd) {
+  return Math.round((Math.log10(ppd) - Math.log10(PX_MIN)) / LOG_RANGE * 100);
+}
+function sliderToPx(v) {
+  return PX_MIN * Math.pow(PX_MAX / PX_MIN, v / 100);
+}
+function adjustZoom(factor) {
+  const W = ctnEl.clientWidth;
+  const centerMs = xToMs(W / 2);
+  pxPerDay = Math.max(PX_MIN, Math.min(PX_MAX, pxPerDay * factor));
+  viewStartMs = centerMs - (W / 2) / pxPerDay * DAY_MS;
+  render();
 }
 
 // ── Tick generation ────────────────────────────────────────────────────────
@@ -116,6 +140,56 @@ function assignLanes(periods) {
   });
 }
 
+// ── Point label layout ─────────────────────────────────────────────────────
+// Measure label widths with a canvas using the same font the SVG renders, so
+// collision tests reflect actual pixels rather than a character-count guess.
+let _measureCtx = null;
+function labelHalfWidth(text) {
+  if (!_measureCtx) {
+    _measureCtx = document.createElement('canvas').getContext('2d');
+    _measureCtx.font = LABEL_FONT;
+  }
+  return _measureCtx.measureText(text).width / 2;
+}
+
+/**
+ * Assign each point a vertical level so no two labels overlap horizontally.
+ *
+ * Levels fan out from the axis alternating above/below, so dense clusters use
+ * both directions instead of stacking ever higher on one side. Points are
+ * visited left-to-right and greedily take the level closest to the axis whose
+ * last label ended before this one begins — the standard interval-packing
+ * approach, which keeps the common sparse case flat against the axis.
+ *
+ * Returns one entry per point: { below, stem, halfW } or null when the canvas
+ * has no free level left, in which case the caller draws a bare dot.
+ */
+function layoutPoints(points, axisY, H, belowBase) {
+  const aboveRoom = axisY - EDGE_MARGIN - FIRST_STEM;
+  const belowRoom = H - axisY - EDGE_MARGIN - belowBase;
+  const nAbove = Math.max(1, Math.floor(aboveRoom / LEVEL_STEP) + 1);
+  const nBelow = Math.max(0, Math.floor(belowRoom / LEVEL_STEP) + 1);
+
+  // Preference order: nearest the axis first, alternating sides.
+  const levels = [];
+  for (let r = 0; r < Math.max(nAbove, nBelow); r++) {
+    if (r < nAbove) levels.push({ below: false, stem: FIRST_STEM + r * LEVEL_STEP });
+    if (r < nBelow) levels.push({ below: true,  stem: belowBase  + r * LEVEL_STEP });
+  }
+
+  const lastRight = new Array(levels.length).fill(-Infinity);
+  return points.map(e => {
+    const x = msToX(dms(e.start_date));
+    const halfW = labelHalfWidth(e.title);
+    const left = x - halfW - LABEL_PAD;
+
+    const idx = lastRight.findIndex(r => r <= left);
+    if (idx === -1) return null;          // fully packed — label would collide
+    lastRight[idx] = x + halfW;
+    return { ...levels[idx], halfW };
+  });
+}
+
 // ── Main render ────────────────────────────────────────────────────────────
 function render() {
   if (!svgEl || !ctnEl || viewStartMs === null) return;
@@ -130,8 +204,9 @@ function render() {
   const startMs = viewStartMs;
   const endMs   = xToMs(W);
 
-  // Painter layers
+  // Painter layers (gStem sits behind gPeriod so dashed lines don't overdraw bars)
   const gGrid   = mkEl('g', {}); svgEl.appendChild(gGrid);
+  const gStem   = mkEl('g', {}); svgEl.appendChild(gStem);
   const gPeriod = mkEl('g', {}); svgEl.appendChild(gPeriod);
   const gAxis   = mkEl('g', {}); svgEl.appendChild(gAxis);
   const gPoint  = mkEl('g', {}); svgEl.appendChild(gPoint);
@@ -170,7 +245,14 @@ function render() {
   }
 
   // ── Period events (below axis) ──
+  // Compute lanes for all periods up front so point stems can clear them.
   const periods = assignLanes(allEvents.filter(e => e.type === 'period'));
+  const numPeriodLanes = periods.length > 0 ? Math.max(...periods.map(p => p.lane)) + 1 : 0;
+  // Stem length for below-axis points: long enough that the label clears the lowest period bar.
+  const belowStem = numPeriodLanes > 0
+    ? PERIOD_OFFSET + numPeriodLanes * (PERIOD_H + PERIOD_GAP) + 20
+    : BELOW_STEM;
+
   for (const e of periods) {
     const x1 = msToX(dms(e.start_date));
     const x2 = msToX(dms(e.end_date));
@@ -196,36 +278,60 @@ function render() {
         'clip-path':'inset(0)'
       }));
     }
-    g.addEventListener('click', ev => { ev.stopPropagation(); openEditPanel(e.id); });
+    const barCenterX = cx1 + w / 2;
+    const barCenterY = barY + PERIOD_H / 2;
+    g.addEventListener('click', ev => { ev.stopPropagation(); openInfoBubble(e.id, barCenterX, barCenterY); });
     gPeriod.appendChild(g);
   }
 
-  // ── Point events (above/below axis, alternating) ──
+  // ── Point events ──
   const points = [...allEvents.filter(e => e.type === 'point')]
     .sort((a,b) => dms(a.start_date) - dms(b.start_date));
+
+  const layout = layoutPoints(points, axisY, H, belowStem);
 
   points.forEach((e, i) => {
     const x = Math.round(msToX(dms(e.start_date)));
     if (x < -100 || x > W + 100) return;
 
-    // Every 4th event dips below; the rest alternate through 3 stem heights above
-    const posInGroup = i % 4;
-    const below   = posInGroup === 3;
-    const stemLen = below ? BELOW_STEM : POINT_STEMS[posInGroup];
+    const dotY = axisY;
+    const slot = layout[i];
 
-    const dotY     = axisY;
-    const lineY1   = below ? dotY + 5 : dotY - 5;
-    const lineY2   = below ? dotY + stemLen : dotY - stemLen;
-    const labelY   = below ? lineY2 + 14 : lineY2 - 8;
-    const anchor   = 'middle';
+    // No level was free — draw just the dot so the cluster stays readable.
+    if (!slot) {
+      const bare = mkEl('g', { style: 'cursor:pointer' });
+      bare.appendChild(mkEl('circle', {
+        cx: x, cy: dotY, r: '4',
+        fill: e.color, stroke: '#ffffff', 'stroke-width': '1.5', opacity: '0.85'
+      }));
+      bare.addEventListener('click', ev => { ev.stopPropagation(); openInfoBubble(e.id, x, dotY); });
+      gPoint.appendChild(bare);
+      return;
+    }
 
-    const g = mkEl('g', { style:'cursor:pointer' });
+    const below   = slot.below;
+    const stemLen = slot.stem;
+    const lineY1 = below ? dotY + 5  : dotY - 5;
+    const lineY2 = below ? dotY + stemLen : dotY - stemLen;
+    const labelY = below ? lineY2 + 14 : lineY2 - 8;
 
-    // Dashed stem
-    g.appendChild(mkEl('line', {
+    // Dashed stem goes behind period bars
+    gStem.appendChild(mkEl('line', {
       x1:x, y1:lineY1, x2:x, y2:lineY2,
       stroke:e.color, 'stroke-width':'1.5',
       'stroke-dasharray':'3,3', opacity:'0.8'
+    }));
+
+    const g = mkEl('g', { style:'cursor:pointer' });
+
+    // Invisible hit area covering dot + stem + label. Sized to the measured
+    // label so it never spills onto a neighbour's territory.
+    const hitHalf   = Math.max(10, slot.halfW);
+    const hitTop    = Math.min(labelY - 14, lineY2 - 2);
+    const hitBottom = Math.max(labelY + 4,  dotY   + 7);
+    g.appendChild(mkEl('rect', {
+      x: x - hitHalf, y: hitTop, width: hitHalf * 2, height: hitBottom - hitTop,
+      fill: 'transparent', stroke: 'none'
     }));
 
     // Dot on axis
@@ -237,14 +343,14 @@ function render() {
     // Label (drawn in label layer so it sits on top of everything)
     gLabel.appendChild(mkTxt(e.title, {
       x, y:labelY,
-      'text-anchor':anchor,
+      'text-anchor':'middle',
       fill:e.color,
       'font-size':'11', 'font-weight':'600',
       'font-family':'system-ui,sans-serif',
       style:'pointer-events:none'
     }));
 
-    g.addEventListener('click', ev => { ev.stopPropagation(); openEditPanel(e.id); });
+    g.addEventListener('click', ev => { ev.stopPropagation(); openInfoBubble(e.id, x, dotY); });
     gPoint.appendChild(g);
   });
 
@@ -256,6 +362,10 @@ function render() {
       'font-size':'14', 'font-family':'system-ui,sans-serif'
     }));
   }
+
+  // Sync zoom slider
+  const zSlider = document.getElementById('zoom-slider');
+  if (zSlider) zSlider.value = pxToSlider(pxPerDay);
 }
 
 // ── Fit view to event range ────────────────────────────────────────────────
@@ -274,8 +384,8 @@ function fitView() {
   const maxMs = Math.max(...dates);
   const range = Math.max(maxMs - minMs, 30 * DAY_MS);
   const pad   = range * 0.18;
-  pxPerDay    = W / ((range + 2 * pad) / DAY_MS);
-  viewStartMs = minMs - pad;
+  pxPerDay    = W / ((range + 2 * pad) / DAY_MS) * 1.3;
+  viewStartMs = minMs - pad - (pad * 0.3 / 2); // re-center after zoom
 }
 
 // ── Load events ────────────────────────────────────────────────────────────
@@ -327,12 +437,69 @@ function initSVG() {
     if (svgEl) svgEl.style.cursor = 'grab';
   });
 
-  // Click on SVG background → close panel
-  svgEl.addEventListener('click', () => closePanel());
+  // Click on SVG background → close panel and bubble
+  svgEl.addEventListener('click', () => { closePanel(); closeInfoBubble(); });
 
   // ResizeObserver fires when ctnEl itself changes size (e.g. panel open/close),
   // unlike window.resize which only fires on browser-window resize.
   new ResizeObserver(() => render()).observe(ctnEl);
+}
+
+// ── Info bubble ────────────────────────────────────────────────────────────
+let infoBubbleEventId = null;
+
+function formatDate(dateStr) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('en-US', {
+    year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC'
+  });
+}
+
+function openInfoBubble(id, svgX, svgY) {
+  const e = eventsCache[id];
+  if (!e) return;
+  infoBubbleEventId = id;
+
+  document.getElementById('info-title').textContent = e.title;
+  document.getElementById('bubble-accent').style.background = e.color || '#1d4ed8';
+  document.getElementById('info-desc').textContent = e.description || '';
+
+  const dateEl = document.getElementById('info-date');
+  if (e.type === 'period' && e.end_date) {
+    dateEl.textContent = `${formatDate(e.start_date)} – ${formatDate(e.end_date)}`;
+  } else {
+    dateEl.textContent = formatDate(e.start_date);
+  }
+
+  const bubble = document.getElementById('event-info-bubble');
+  // Show offscreen first so we can measure its size
+  bubble.style.left = '-9999px';
+  bubble.style.top  = '-9999px';
+  bubble.style.display = 'block';
+
+  const bW = bubble.offsetWidth;
+  const bH = bubble.offsetHeight;
+  const cW = ctnEl.clientWidth;
+  const cH = ctnEl.clientHeight;
+  const PAD = 10;
+
+  // Center on event, then clamp so it stays inside the canvas
+  let left = Math.round(Math.max(PAD + bW / 2, Math.min(svgX, cW - PAD - bW / 2)));
+  let top  = Math.round(Math.max(PAD + bH / 2, Math.min(svgY, cH - PAD - bH / 2)));
+
+  bubble.style.left = left + 'px';
+  bubble.style.top  = top  + 'px';
+}
+
+function closeInfoBubble() {
+  document.getElementById('event-info-bubble').style.display = 'none';
+  infoBubbleEventId = null;
+}
+
+function openEditFromBubble() {
+  const id = infoBubbleEventId;
+  closeInfoBubble();
+  if (id !== null) openEditPanel(id);
 }
 
 // ── Panel management ───────────────────────────────────────────────────────
@@ -344,7 +511,7 @@ function openAddPanel() {
   document.getElementById('f-desc').value  = '';
   document.getElementById('f-start').value = '';
   document.getElementById('f-end').value   = '';
-  setColorValue('#1d4ed8');
+  setColorValue(lastUsedColor);
   setEventType('point');
   clearPanelError();
   document.getElementById('event-panel').classList.add('open');
@@ -427,6 +594,7 @@ async function saveEvent() {
   }
   const data = await res.json();
   if (data.error) { showPanelError(data.error); return; }
+  lastUsedColor = color;
   closePanel();
   await loadEvents(true);
 }
@@ -472,6 +640,23 @@ document.addEventListener('DOMContentLoaded', () => {
       document.getElementById('color-hex').textContent = colorInput.value;
     });
   }
+
+  const zoomSlider = document.getElementById('zoom-slider');
+  if (zoomSlider) {
+    zoomSlider.addEventListener('input', () => {
+      const W = ctnEl.clientWidth;
+      const centerMs = xToMs(W / 2);
+      pxPerDay = sliderToPx(Number(zoomSlider.value));
+      viewStartMs = centerMs - (W / 2) / pxPerDay * DAY_MS;
+      render();
+    });
+    // Prevent drag-pan from starting when the user grabs the slider
+    zoomSlider.addEventListener('mousedown', ev => ev.stopPropagation());
+  }
+
+  const zoomBar = document.getElementById('zoom-bar');
+  if (zoomBar) zoomBar.addEventListener('mousedown', ev => ev.stopPropagation());
+
   initSVG();
   loadEvents(false);
 });
