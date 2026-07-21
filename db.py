@@ -22,7 +22,9 @@ CREATE TABLE IF NOT EXISTS events (
     type        TEXT NOT NULL CHECK(type IN ('point', 'period')),
     start_date  TEXT NOT NULL,
     end_date    TEXT,
-    color       TEXT NOT NULL DEFAULT '#1d4ed8'
+    color       TEXT NOT NULL DEFAULT '#1d4ed8',
+    -- Period events with no fixed end. end_date stays NULL when this is set.
+    ongoing     INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -39,6 +41,18 @@ def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     with get_conn() as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
+
+
+def _migrate(conn):
+    """Bring an already-created events table up to the current schema.
+
+    CREATE TABLE IF NOT EXISTS is a no-op on existing databases, so new columns
+    have to be added explicitly. Each step is guarded so this is idempotent.
+    """
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(events)")}
+    if "ongoing" not in cols:
+        conn.execute("ALTER TABLE events ADD COLUMN ongoing INTEGER NOT NULL DEFAULT 0")
 
 
 def _row(r):
@@ -56,8 +70,12 @@ def get_timelines():
         return _rows(conn.execute("""
             SELECT t.*,
                    COUNT(e.id)                                  AS event_count,
-                   MIN(substr(e.start_date, 1, 4))              AS first_year,
-                   MAX(substr(COALESCE(e.end_date, e.start_date), 1, 4)) AS last_year
+                   MIN(substr(e.start_date, 1, 4))             AS first_year,
+                   -- An ongoing period runs to today, so it extends the range.
+                   MAX(substr(CASE WHEN e.ongoing = 1
+                                   THEN strftime('%Y-%m-%d', 'now')
+                                   ELSE COALESCE(e.end_date, e.start_date)
+                              END, 1, 4))                      AS last_year
             FROM timelines t
             LEFT JOIN events e ON e.timeline_id = t.id
             GROUP BY t.id
@@ -101,22 +119,22 @@ def get_event(event_id):
         return _row(conn.execute("SELECT * FROM events WHERE id=?", (event_id,)).fetchone())
 
 
-def create_event(timeline_id, title, description, etype, start_date, end_date, color):
+def create_event(timeline_id, title, description, etype, start_date, end_date, color, ongoing=0):
     with get_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO events (timeline_id, title, description, type, start_date, end_date, color) "
-            "VALUES (?,?,?,?,?,?,?)",
-            (timeline_id, title, description, etype, start_date, end_date, color)
+            "INSERT INTO events (timeline_id, title, description, type, start_date, end_date, color, ongoing) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (timeline_id, title, description, etype, start_date, end_date, color, ongoing)
         )
         return cur.lastrowid
 
 
-def update_event(event_id, title, description, etype, start_date, end_date, color):
+def update_event(event_id, title, description, etype, start_date, end_date, color, ongoing=0):
     with get_conn() as conn:
         cur = conn.execute(
-            "UPDATE events SET title=?, description=?, type=?, start_date=?, end_date=?, color=? "
+            "UPDATE events SET title=?, description=?, type=?, start_date=?, end_date=?, color=?, ongoing=? "
             "WHERE id=?",
-            (title, description, etype, start_date, end_date, color, event_id)
+            (title, description, etype, start_date, end_date, color, ongoing, event_id)
         )
         return cur.rowcount
 
