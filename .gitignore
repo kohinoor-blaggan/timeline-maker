@@ -1,5 +1,7 @@
 .venv/
 __pycache__/
 *.pyc
-timelines.db
+*.db
 *.db-journal
+# Keep the data/ dir itself (it's the Docker volume mount point), not its contents
+!data/.gitkeep

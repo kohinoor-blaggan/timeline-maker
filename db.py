@@ -1,7 +1,11 @@
 import os
 import sqlite3
 
-DB_PATH = os.path.join(os.path.dirname(__file__), 'timelines.db')
+_PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+# Overridden in Docker to point at the mounted /data volume so the database
+# survives container rebuilds.
+DB_PATH = os.getenv('TIMELINE_DB', os.path.join(_PROJECT_ROOT, 'data', 'timelines.db'))
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS timelines (
@@ -31,6 +35,8 @@ def get_conn():
 
 
 def init_db():
+    # The data dir may not exist yet on a fresh checkout or a fresh volume.
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     with get_conn() as conn:
         conn.executescript(SCHEMA)
 

@@ -1,8 +1,0 @@
-Few things to do:
-
-1) Clean up home UI. Open button too big, edit button not needed, delete button not working. Weird double line between title and open button, make it cleaner. Date probably not needed? 
-Take some creative liberty and work out these kinks, keep to the style. Also sort alphabetically saince date created is no longer needed. (Could maybe put a subtitle for years included in the timeline.
-2) Create a favicon for the webpage. Using that calendar emoji on the top left of the screen is fine for now.
-3) In the timeline, events that are close together sometimes overlap and look messy. Find a way to mitigate this. Possibly by using both up and down direction for points and making the points at various different heights. 
-Feel free to create an algorithm based on current zoom, dates of events, and length of name to find where to play visually if that seems helpful for solving.
-
