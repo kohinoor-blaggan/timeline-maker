@@ -1,5 +1,92 @@
 {% extends "base.html" %}
 
+{% block head %}
+<style>
+  .tl-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 1rem;
+  }
+
+  /* The whole card is the "open" affordance — no separate Open button. */
+  .tl-card {
+    position: relative;
+    padding: 1rem 1.1rem;
+    background: #fff;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.05);
+    transition: border-color .14s, box-shadow .14s, transform .14s;
+  }
+  .tl-card:hover {
+    border-color: #1d4ed8;
+    box-shadow: 0 4px 14px rgba(29,78,216,.12);
+    transform: translateY(-2px);
+  }
+  .tl-card:focus-within {
+    border-color: #1d4ed8;
+  }
+
+  .tl-card-name {
+    display: block;
+    font-weight: 700;
+    font-size: 1rem;
+    color: #1e293b;
+    line-height: 1.35;
+    word-break: break-word;
+    text-decoration: none;
+    /* Keep clear of the delete button in the corner */
+    padding-right: 1.75rem;
+  }
+  /* Stretch the name's hit area over the whole card so clicking anywhere opens
+     it, while keeping the delete button a real sibling button (valid markup). */
+  .tl-card-name::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: 10px;
+  }
+
+  .tl-card-meta {
+    display: block;
+    margin-top: .3rem;
+    font-size: .8rem;
+    color: #94a3b8;
+    font-weight: 500;
+  }
+
+  /* Delete: quiet until you hover the card, so it never competes with the name */
+  .tl-delete {
+    position: absolute;
+    z-index: 1;            /* sit above the stretched card link */
+    top: .6rem;
+    right: .6rem;
+    background: none;
+    border: none;
+    width: 1.55rem;
+    height: 1.55rem;
+    padding: 0;
+    margin: 0;
+    border-radius: 5px;
+    font-size: .8rem;
+    line-height: 1;
+    color: #cbd5e1;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity .14s, background .14s, color .14s;
+  }
+  .tl-card:hover .tl-delete { opacity: 1; }
+  .tl-delete:hover { background: #fee2e2; color: #ef4444; }
+  .tl-delete:focus-visible { opacity: 1; outline: 2px solid #1d4ed8; }
+
+  .empty-state {
+    color: #94a3b8;
+    text-align: center;
+    margin-top: 3rem;
+  }
+</style>
+{% endblock %}
+
 {% block content %}
 <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:1.5rem; flex-wrap:wrap; gap:.75rem">
   <h2 style="margin:0">Your Timelines</h2>
@@ -22,27 +109,26 @@
 </div>
 
 {% if timelines %}
-<div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(260px, 1fr)); gap:1rem">
+<div class="tl-grid">
   {% for tl in timelines %}
-  <article style="margin:0; border-radius:8px; box-shadow:0 2px 8px rgba(0,0,0,.08)">
-    <header style="display:flex; justify-content:space-between; align-items:flex-start; gap:.5rem">
-      <strong style="word-break:break-word">{{ tl.name }}</strong>
-      <small style="color:#94a3b8; white-space:nowrap; flex-shrink:0">{{ tl.created_at[:10] }}</small>
-    </header>
-    <footer style="display:flex; justify-content:space-between; align-items:center">
-      <a href="{{ url_for('timeline_editor', timeline_id=tl.id) }}" role="button" style="margin:0">Open →</a>
-      <div style="display:flex; gap:.4rem">
-        <button class="outline secondary" style="padding:.2rem .6rem; font-size:.82rem; margin:0"
-                onclick="renameTimeline({{ tl.id }}, {{ tl.name | tojson }})">✎</button>
-        <button class="outline" style="padding:.2rem .6rem; font-size:.82rem; margin:0; color:#ef4444; border-color:#fca5a5"
-                onclick="deleteTimeline({{ tl.id }}, {{ tl.name | tojson }})">✕</button>
-      </div>
-    </footer>
-  </article>
+  <div class="tl-card">
+    <a class="tl-card-name" href="{{ url_for('timeline_editor', timeline_id=tl.id) }}">{{ tl.name }}</a>
+    <span class="tl-card-meta">
+      {%- if tl.event_count == 0 -%}
+        Empty
+      {%- elif tl.first_year == tl.last_year -%}
+        {{ tl.first_year }} · {{ tl.event_count }} event{{ '' if tl.event_count == 1 else 's' }}
+      {%- else -%}
+        {{ tl.first_year }}–{{ tl.last_year }} · {{ tl.event_count }} events
+      {%- endif -%}
+    </span>
+    <button class="tl-delete" title="Delete timeline"
+            data-id="{{ tl.id }}" data-name="{{ tl.name }}">✕</button>
+  </div>
   {% endfor %}
 </div>
 {% else %}
-<p style="color:#94a3b8; text-align:center; margin-top:3rem">No timelines yet — create one above.</p>
+<p class="empty-state">No timelines yet — create one above.</p>
 {% endif %}
 {% endblock %}
 
@@ -55,25 +141,21 @@
     if (!visible) document.getElementById('create-input').focus();
   }
 
-  async function renameTimeline(id, currentName) {
-    const name = prompt('New name for this timeline:', currentName);
-    if (!name || name.trim() === currentName) return;
-    const res = await fetch(`/timeline/${id}/rename`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: name.trim() })
-    });
-    const data = await res.json();
-    if (data.error) { alert(data.error); return; }
-    location.reload();
-  }
+  // Delegated so timeline names never have to be interpolated into an inline
+  // handler — a name containing a quote used to break the attribute outright.
+  document.addEventListener('click', async (ev) => {
+    const btn = ev.target.closest('.tl-delete');
+    if (!btn) return;
+    ev.preventDefault();   // don't follow the card link
+    ev.stopPropagation();
 
-  async function deleteTimeline(id, name) {
+    const { id, name } = btn.dataset;
     if (!confirm(`Delete "${name}"? This cannot be undone.`)) return;
-    const res = await fetch(`/timeline/${id}`, { method: 'DELETE' });
-    const data = await res.json();
+
+    const res  = await fetch(`/timeline/${id}`, { method: 'DELETE' });
+    const data = await res.json().catch(() => ({}));
     if (data.error) { alert(data.error); return; }
     location.reload();
-  }
+  });
 </script>
 {% endblock %}

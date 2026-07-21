@@ -17,12 +17,17 @@ let svgEl = null, ctnEl = null;
 // Layout constants
 const DAY_MS          = 86400000;
 const AXIS_RATIO      = 0.40;   // center line at 40% of container height
-const POINT_STEMS     = [50, 80, 110]; // stem lengths above axis (cycles 0,1,2)
-const BELOW_STEM      = 48;     // stem length for below-axis points (every 4th)
 const PERIOD_H        = 24;     // period bar height
 const PERIOD_GAP      = 5;      // vertical gap between period lanes
 const PERIOD_OFFSET   = 38;     // gap between axis and first period lane
 const SVGNS           = 'http://www.w3.org/2000/svg';
+
+// Point-label layout
+const LABEL_FONT      = '600 11px system-ui, sans-serif';
+const FIRST_STEM      = 46;     // stem length of the level nearest the axis
+const LEVEL_STEP      = 24;     // vertical distance between adjacent levels
+const LABEL_PAD       = 10;     // min horizontal gap between neighbouring labels
+const EDGE_MARGIN     = 22;     // keep the furthest level inside the canvas
 
 // ── Date utilities ─────────────────────────────────────────────────────────
 function dms(dateStr) {
@@ -135,6 +140,56 @@ function assignLanes(periods) {
   });
 }
 
+// ── Point label layout ─────────────────────────────────────────────────────
+// Measure label widths with a canvas using the same font the SVG renders, so
+// collision tests reflect actual pixels rather than a character-count guess.
+let _measureCtx = null;
+function labelHalfWidth(text) {
+  if (!_measureCtx) {
+    _measureCtx = document.createElement('canvas').getContext('2d');
+    _measureCtx.font = LABEL_FONT;
+  }
+  return _measureCtx.measureText(text).width / 2;
+}
+
+/**
+ * Assign each point a vertical level so no two labels overlap horizontally.
+ *
+ * Levels fan out from the axis alternating above/below, so dense clusters use
+ * both directions instead of stacking ever higher on one side. Points are
+ * visited left-to-right and greedily take the level closest to the axis whose
+ * last label ended before this one begins — the standard interval-packing
+ * approach, which keeps the common sparse case flat against the axis.
+ *
+ * Returns one entry per point: { below, stem, halfW } or null when the canvas
+ * has no free level left, in which case the caller draws a bare dot.
+ */
+function layoutPoints(points, axisY, H, belowBase) {
+  const aboveRoom = axisY - EDGE_MARGIN - FIRST_STEM;
+  const belowRoom = H - axisY - EDGE_MARGIN - belowBase;
+  const nAbove = Math.max(1, Math.floor(aboveRoom / LEVEL_STEP) + 1);
+  const nBelow = Math.max(0, Math.floor(belowRoom / LEVEL_STEP) + 1);
+
+  // Preference order: nearest the axis first, alternating sides.
+  const levels = [];
+  for (let r = 0; r < Math.max(nAbove, nBelow); r++) {
+    if (r < nAbove) levels.push({ below: false, stem: FIRST_STEM + r * LEVEL_STEP });
+    if (r < nBelow) levels.push({ below: true,  stem: belowBase  + r * LEVEL_STEP });
+  }
+
+  const lastRight = new Array(levels.length).fill(-Infinity);
+  return points.map(e => {
+    const x = msToX(dms(e.start_date));
+    const halfW = labelHalfWidth(e.title);
+    const left = x - halfW - LABEL_PAD;
+
+    const idx = lastRight.findIndex(r => r <= left);
+    if (idx === -1) return null;          // fully packed — label would collide
+    lastRight[idx] = x + halfW;
+    return { ...levels[idx], halfW };
+  });
+}
+
 // ── Main render ────────────────────────────────────────────────────────────
 function render() {
   if (!svgEl || !ctnEl || viewStartMs === null) return;
@@ -233,30 +288,29 @@ function render() {
   const points = [...allEvents.filter(e => e.type === 'point')]
     .sort((a,b) => dms(a.start_date) - dms(b.start_date));
 
-  // Greedy proximity-based slot assignment so labels don't overlap at any zoom level.
-  // Slots 0-2 go above the axis at increasing heights; slot 3 goes below.
-  const placed = []; // { x, halfW, slotIdx }
-  const pointSlots = points.map(e => {
-    const x = msToX(dms(e.start_date));
-    const halfW = Math.max(28, e.title.length * 3.2);
-    const blocked = new Set(
-      placed.filter(p => Math.abs(p.x - x) < p.halfW + halfW + 6).map(p => p.slotIdx)
-    );
-    let slotIdx = 0;
-    while (blocked.has(slotIdx) && slotIdx < 3) slotIdx++;
-    placed.push({ x, halfW, slotIdx });
-    return slotIdx;
-  });
+  const layout = layoutPoints(points, axisY, H, belowStem);
 
   points.forEach((e, i) => {
     const x = Math.round(msToX(dms(e.start_date)));
     if (x < -100 || x > W + 100) return;
 
-    const slotIdx = pointSlots[i];
-    const below   = slotIdx === 3;
-    const stemLen = below ? belowStem : POINT_STEMS[slotIdx];
+    const dotY = axisY;
+    const slot = layout[i];
 
-    const dotY   = axisY;
+    // No level was free — draw just the dot so the cluster stays readable.
+    if (!slot) {
+      const bare = mkEl('g', { style: 'cursor:pointer' });
+      bare.appendChild(mkEl('circle', {
+        cx: x, cy: dotY, r: '4',
+        fill: e.color, stroke: '#ffffff', 'stroke-width': '1.5', opacity: '0.85'
+      }));
+      bare.addEventListener('click', ev => { ev.stopPropagation(); openInfoBubble(e.id, x, dotY); });
+      gPoint.appendChild(bare);
+      return;
+    }
+
+    const below   = slot.below;
+    const stemLen = slot.stem;
     const lineY1 = below ? dotY + 5  : dotY - 5;
     const lineY2 = below ? dotY + stemLen : dotY - stemLen;
     const labelY = below ? lineY2 + 14 : lineY2 - 8;
@@ -270,11 +324,13 @@ function render() {
 
     const g = mkEl('g', { style:'cursor:pointer' });
 
-    // Invisible hit area covering dot + stem + label
+    // Invisible hit area covering dot + stem + label. Sized to the measured
+    // label so it never spills onto a neighbour's territory.
+    const hitHalf   = Math.max(10, slot.halfW);
     const hitTop    = Math.min(labelY - 14, lineY2 - 2);
     const hitBottom = Math.max(labelY + 4,  dotY   + 7);
     g.appendChild(mkEl('rect', {
-      x: x - 32, y: hitTop, width: 64, height: hitBottom - hitTop,
+      x: x - hitHalf, y: hitTop, width: hitHalf * 2, height: hitBottom - hitTop,
       fill: 'transparent', stroke: 'none'
     }));
 

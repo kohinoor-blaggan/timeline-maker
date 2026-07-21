@@ -44,8 +44,19 @@ def _rows(rs):
 
 
 def get_timelines():
+    """Timelines sorted by name, each annotated with its event count and the
+    span of years its events cover (first_year/last_year are None if empty)."""
     with get_conn() as conn:
-        return _rows(conn.execute("SELECT * FROM timelines ORDER BY created_at DESC").fetchall())
+        return _rows(conn.execute("""
+            SELECT t.*,
+                   COUNT(e.id)                                  AS event_count,
+                   MIN(substr(e.start_date, 1, 4))              AS first_year,
+                   MAX(substr(COALESCE(e.end_date, e.start_date), 1, 4)) AS last_year
+            FROM timelines t
+            LEFT JOIN events e ON e.timeline_id = t.id
+            GROUP BY t.id
+            ORDER BY t.name COLLATE NOCASE
+        """).fetchall())
 
 
 def get_timeline(tid):
