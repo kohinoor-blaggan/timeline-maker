@@ -1,5 +1,6 @@
 import os
 import sqlite3
+from datetime import datetime, timezone
 
 _PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
@@ -24,7 +25,9 @@ CREATE TABLE IF NOT EXISTS events (
     end_date    TEXT,
     color       TEXT NOT NULL DEFAULT '#1d4ed8',
     -- Period events with no fixed end. end_date stays NULL when this is set.
-    ongoing     INTEGER NOT NULL DEFAULT 0
+    ongoing     INTEGER NOT NULL DEFAULT 0,
+    -- Manual row pin for period bars. NULL = auto-placed by the renderer.
+    lane        INTEGER
 );
 """
 
@@ -53,6 +56,28 @@ def _migrate(conn):
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(events)")}
     if "ongoing" not in cols:
         conn.execute("ALTER TABLE events ADD COLUMN ongoing INTEGER NOT NULL DEFAULT 0")
+    if "lane" not in cols:
+        conn.execute("ALTER TABLE events ADD COLUMN lane INTEGER")
+
+
+def today_str():
+    """Today in UTC as YYYY-MM-DD — the single definition of "now" for the
+    end date of ongoing events, matching how dates are stored elsewhere."""
+    return datetime.now(timezone.utc).strftime('%Y-%m-%d')
+
+
+def refresh_ongoing_end_dates():
+    """Stamp every ongoing event's end_date with today.
+
+    Runs once at start-up, so the stored end date is current as of the last
+    relaunch. Redeploying (or restarting the container) is what advances it —
+    nothing refreshes it while the app is running.
+    """
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE events SET end_date = ? WHERE ongoing = 1", (today_str(),)
+        )
+        return cur.rowcount
 
 
 def _row(r):
@@ -142,4 +167,18 @@ def update_event(event_id, title, description, etype, start_date, end_date, colo
 def delete_event(event_id):
     with get_conn() as conn:
         cur = conn.execute("DELETE FROM events WHERE id=?", (event_id,))
+        return cur.rowcount
+
+
+def set_event_lane(event_id, lane):
+    """Pin a period to a row (lane), or pass None to return it to auto layout."""
+    with get_conn() as conn:
+        cur = conn.execute("UPDATE events SET lane=? WHERE id=?", (lane, event_id))
+        return cur.rowcount
+
+
+def clear_lanes(timeline_id):
+    """Release every period in a timeline back to automatic placement."""
+    with get_conn() as conn:
+        cur = conn.execute("UPDATE events SET lane=NULL WHERE timeline_id=?", (timeline_id,))
         return cur.rowcount
