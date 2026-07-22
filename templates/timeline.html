@@ -117,10 +117,6 @@
     margin: 0;
     flex-shrink: 0;
   }
-  .ongoing-row small {
-    color: #94a3b8;
-    font-weight: 400;
-  }
   /* Greyed out but still visible, so it's clear why the field is inactive */
   #f-end:disabled {
     background: #f1f5f9;
@@ -255,6 +251,7 @@
       <span id="tl-name">{{ timeline.name }}</span>
       <button class="outline secondary toolbar-btn" onclick="startRename()">✎ Rename</button>
       <span style="flex:1"></span>
+      <button class="outline secondary toolbar-btn" onclick="autoArrange()" title="Clear manual row placements">⤢ Auto-arrange</button>
       <button onclick="openAddPanel()" style="margin:0; padding:.3rem .9rem; font-size:.85rem; border-radius:4px">+ Add Event</button>
       <button class="outline toolbar-btn" style="color:#ef4444; border-color:#fca5a5" onclick="deleteThisTimeline()">🗑 Delete</button>
     </div>
@@ -327,7 +324,7 @@
       </label>
       <label class="ongoing-row">
         <input type="checkbox" id="f-ongoing" onchange="setOngoing(this.checked)">
-        <span>Ongoing <small>— no end date, runs to the present</small></span>
+        <span>Ongoing</span>
       </label>
     </div>
 

@@ -12,6 +12,10 @@ let pxPerDay = 3;
 let viewStartMs = null;
 let isDragging = false, dragStartX = 0, dragStartMs = 0;
 
+// Vertical drag of a period bar between rows. Null when no drag is in progress.
+let laneDrag = null;        // { id, startY, row, baseRow, maxRow, moved, cx, cy }
+let suppressBgClick = false; // eat the click that follows a bar interaction
+
 let svgEl = null, ctnEl = null;
 
 // Layout constants
@@ -139,19 +143,103 @@ function generateTicks(startMs, endMs) {
 }
 
 // ── Period lane assignment ─────────────────────────────────────────────────
+// A period's occupied span. Ongoing bars never free their row (end = Infinity).
+function periodSpan(e) {
+  return { s: dms(e.start_date), end: e.ongoing ? Infinity : dms(e.end_date) };
+}
+
+// Time overlap test. Touching spans (one ends exactly where the next starts)
+// do NOT overlap, so back-to-back periods are allowed to share a row.
+function spansOverlap(a, b) {
+  return a.s < b.end && b.s < a.end;
+}
+
+/**
+ * Resolve each period to a display row index.
+ *
+ * `e.lane` is a stored *group key*, not a row position: periods sharing a key
+ * are one explicit group and always share a row (the continuity case). Unpinned
+ * periods auto-pack among themselves — into the earliest row with no time
+ * overlap — but never into a pinned group's row, so a group's row shows exactly
+ * its members. Finally every row is ordered top-to-bottom by its earliest start
+ * date, so rows read chronologically and a pinned group is never yanked to the
+ * top.
+ */
 function assignLanes(periods) {
-  const sorted = [...periods].sort((a,b) => dms(a.start_date) - dms(b.start_date));
-  const laneEnds = [];
-  return sorted.map(e => {
-    const s = dms(e.start_date);
-    // An ongoing period never frees its lane — nothing may follow it there.
-    const end = e.ongoing ? Infinity : dms(e.end_date);
-    const gap = 4 * DAY_MS;
-    let lane = laneEnds.findIndex(t => t + gap <= s);
-    if (lane === -1) { lane = laneEnds.length; laneEnds.push(end); }
-    else laneEnds[lane] = end;
-    return { ...e, lane };
-  });
+  const pinned = periods.filter(e => e.lane != null);
+  const auto   = periods.filter(e => e.lane == null)
+                        .sort((a,b) => dms(a.start_date) - dms(b.start_date));
+
+  const rows = [];   // each: { spans: [...], ids: [...] }
+
+  // One row per distinct group key.
+  const rowByKey = new Map();
+  for (const e of pinned) {
+    let row = rowByKey.get(e.lane);
+    if (!row) { row = { spans: [], ids: [] }; rowByKey.set(e.lane, row); rows.push(row); }
+    row.spans.push(periodSpan(e));
+    row.ids.push(e.id);
+  }
+  const autoStart = rows.length;   // pinned rows occupy [0, autoStart)
+
+  // Auto periods pack only among auto rows, never onto a pinned group's row.
+  for (const e of auto) {
+    const span = periodSpan(e);
+    let row = null;
+    for (let i = autoStart; i < rows.length; i++) {
+      if (!rows[i].spans.some(o => spansOverlap(span, o))) { row = rows[i]; break; }
+    }
+    if (!row) { row = { spans: [], ids: [] }; rows.push(row); }
+    row.spans.push(span);
+    row.ids.push(e.id);
+  }
+
+  // Order rows by earliest start; that ordering is the display row index.
+  const rowStart = r => Math.min(...r.spans.map(s => s.s));
+  rows.sort((a,b) => rowStart(a) - rowStart(b));
+
+  const laneOfId = new Map();
+  rows.forEach((r, i) => r.ids.forEach(id => laneOfId.set(id, i)));
+  return periods.map(e => ({ ...e, lane: laneOfId.get(e.id) }));
+}
+
+// Next free group key — max stored key + 1 (keys are opaque, only equality and
+// "fresh" matter since rows are ordered by date, not by key).
+function nextLaneKey() {
+  return allEvents.reduce((m, e) => Math.max(m, e.lane == null ? -1 : e.lane), -1) + 1;
+}
+
+/**
+ * Persist the result of dropping period `id` onto display row `targetRow`.
+ * Dropping onto another row merges the bar into that row's group; dropping past
+ * the last row (or onto its own row) gives it a fresh singleton group.
+ */
+async function dropOnRow(id, targetRow) {
+  // Resolve the committed layout to see who currently sits in each row.
+  const committed = assignLanes(allEvents.filter(e => e.type === 'period'));
+  const rowMembers = new Map();
+  let fromRow = null;
+  for (const p of committed) {
+    if (!rowMembers.has(p.lane)) rowMembers.set(p.lane, []);
+    rowMembers.get(p.lane).push(p.id);
+    if (p.id === id) fromRow = p.lane;
+  }
+  if (targetRow === fromRow) { render(); return; }   // dropped back on its row
+
+  const members = (rowMembers.get(targetRow) || []).filter(m => m !== id);
+  // Join an existing pinned group if the target row has one; else form a new
+  // group (which also pins any previously-auto bars sharing that row).
+  const pinnedKey = members.map(m => eventsCache[m].lane).find(v => v != null);
+  const key = (members.length && pinnedKey != null) ? pinnedKey : nextLaneKey();
+
+  const toSet = [id, ...members].filter(m => eventsCache[m].lane !== key);
+  for (const m of toSet) {
+    await fetch(`/api/event/${m}/lane`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lane: key })
+    });
+  }
+  await loadEvents(true);
 }
 
 // ── Point label layout ─────────────────────────────────────────────────────
@@ -261,7 +349,21 @@ function render() {
   // ── Period events (below axis) ──
   // Compute lanes for all periods up front so point stems can clear them.
   const periods = assignLanes(allEvents.filter(e => e.type === 'period'));
+  // While dragging, show the grabbed bar at the hovered row (may be a new one).
+  if (laneDrag) {
+    const d = periods.find(p => p.id === laneDrag.id);
+    if (d) d.lane = laneDrag.row;
+  }
   const numPeriodLanes = periods.length > 0 ? Math.max(...periods.map(p => p.lane)) + 1 : 0;
+
+  // Faint guide across the row the dragged bar will land in.
+  if (laneDrag && laneDrag.moved) {
+    const guideY = axisY + PERIOD_OFFSET + laneDrag.row * (PERIOD_H + PERIOD_GAP);
+    gStem.appendChild(mkEl('rect', {
+      x: 0, y: guideY - 2, width: W, height: PERIOD_H + 4,
+      fill: '#1d4ed8', opacity: '0.07', rx: '4'
+    }));
+  }
   // Stem length for below-axis points: long enough that the label clears the lowest period bar.
   const belowStem = numPeriodLanes > 0
     ? PERIOD_OFFSET + numPeriodLanes * (PERIOD_H + PERIOD_GAP) + 20
@@ -278,11 +380,12 @@ function render() {
     const w    = Math.max(cx2 - cx1, 4);
     const fg   = contrastColor(e.color);
 
-    const g = mkEl('g', { style:'cursor:pointer' });
-    g.appendChild(mkEl('rect', {
+    const dragging = laneDrag && laneDrag.id === e.id && laneDrag.moved;
+    const g = mkEl('g', { style: `cursor:${dragging ? 'grabbing' : 'grab'}` });
+    g.appendChild(mkEl('rect', Object.assign({
       x:cx1, y:barY, width:w, height:PERIOD_H,
-      rx:'4', fill:e.color, opacity:'0.92'
-    }));
+      rx:'4', fill:e.color, opacity: dragging ? '1' : '0.92'
+    }, dragging ? { stroke:'#1e293b', 'stroke-width':'1.5' } : {})));
 
     // Ongoing periods get an arrow past "today" so the bar doesn't read as a
     // hard end. Only drawn when the real end is actually on screen.
@@ -305,7 +408,17 @@ function render() {
     }
     const barCenterX = cx1 + w / 2;
     const barCenterY = barY + PERIOD_H / 2;
-    g.addEventListener('click', ev => { ev.stopPropagation(); openInfoBubble(e.id, barCenterX, barCenterY); });
+    // Start a vertical row-drag. A drag repins the bar; a click (no move) opens
+    // the info bubble — both handled in the window mouseup below.
+    g.addEventListener('mousedown', ev => {
+      if (ev.button !== 0) return;
+      ev.stopPropagation();               // keep the background pan from starting
+      const maxRow = periods.length ? Math.max(...periods.map(p => p.lane)) + 1 : 0;
+      laneDrag = {
+        id: e.id, startY: ev.clientY, row: e.lane,
+        maxRow, moved: false, cx: barCenterX, cy: barCenterY
+      };
+    });
     gPeriod.appendChild(g);
   }
 
@@ -452,18 +565,47 @@ function initSVG() {
     ev.preventDefault();
   });
   window.addEventListener('mousemove', ev => {
+    // A period row-drag takes priority over background pan.
+    if (laneDrag) {
+      const dy = ev.clientY - laneDrag.startY;
+      if (!laneDrag.moved && Math.abs(dy) < 4) return;   // tolerate a jittery click
+      laneDrag.moved = true;
+      const H = ctnEl.clientHeight;
+      const axisY = Math.round(H * AXIS_RATIO);
+      const mouseY = ev.clientY - svgEl.getBoundingClientRect().top;
+      let row = Math.round((mouseY - axisY - PERIOD_OFFSET) / (PERIOD_H + PERIOD_GAP));
+      laneDrag.row = Math.max(0, Math.min(row, laneDrag.maxRow));
+      render();
+      return;
+    }
     if (!isDragging) return;
     const dx = ev.clientX - dragStartX;
     viewStartMs = dragStartMs - dx / pxPerDay * DAY_MS;
     render();
   });
-  window.addEventListener('mouseup', () => {
+  window.addEventListener('mouseup', async () => {
     isDragging = false;
     if (svgEl) svgEl.style.cursor = 'grab';
+
+    if (!laneDrag) return;
+    const d = laneDrag;
+    laneDrag = null;
+    suppressBgClick = true;   // don't let the trailing click close things
+
+    if (!d.moved) {
+      openInfoBubble(d.id, d.cx, d.cy);   // it was a click, not a drag
+      return;
+    }
+    await dropOnRow(d.id, d.row);
   });
 
-  // Click on SVG background → close panel and bubble
-  svgEl.addEventListener('click', () => { closePanel(); closeInfoBubble(); });
+  // Click on SVG background → close panel and bubble (unless a bar interaction
+  // just handled this same click).
+  svgEl.addEventListener('click', () => {
+    if (suppressBgClick) { suppressBgClick = false; return; }
+    closePanel();
+    closeInfoBubble();
+  });
 
   // ResizeObserver fires when ctnEl itself changes size (e.g. panel open/close),
   // unlike window.resize which only fires on browser-window resize.
@@ -663,6 +805,11 @@ async function startRename() {
   if (data.error) { alert(data.error); return; }
   document.getElementById('tl-name').textContent = name.trim();
   document.title = name.trim() + ' — Timeline Maker';
+}
+
+async function autoArrange() {
+  await fetch(`/api/timeline/${TIMELINE_ID}/lanes/reset`, { method: 'POST' });
+  await loadEvents(true);
 }
 
 async function deleteThisTimeline() {

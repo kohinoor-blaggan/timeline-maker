@@ -7,6 +7,7 @@ app = Flask(__name__)
 app.secret_key = "timeline-maker-dev-key"
 
 db.init_db()
+db.refresh_ongoing_end_dates()
 
 
 @app.route("/")
@@ -97,7 +98,8 @@ def create_event(timeline_id):
     if err:
         return jsonify({"error": err}), 400
     if ongoing:
-        end_date = None
+        # Ongoing events carry today's date; refreshed again on each start-up.
+        end_date = db.today_str()
 
     eid = db.create_event(timeline_id, title, description, etype, start_date, end_date, color, ongoing)
     return jsonify({"ok": True, "id": eid}), 201
@@ -120,7 +122,8 @@ def update_event(event_id):
     if err:
         return jsonify({"error": err}), 400
     if ongoing:
-        end_date = None
+        # Ongoing events carry today's date; refreshed again on each start-up.
+        end_date = db.today_str()
 
     db.update_event(event_id, title, description, etype, start_date, end_date, color, ongoing)
     return jsonify({"ok": True})
@@ -131,6 +134,32 @@ def delete_event(event_id):
     if not db.get_event(event_id):
         return jsonify({"error": "Not found"}), 404
     db.delete_event(event_id)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/event/<int:event_id>/lane", methods=["PATCH"])
+def set_event_lane(event_id):
+    event = db.get_event(event_id)
+    if not event:
+        return jsonify({"error": "Not found"}), 404
+    data = request.get_json(silent=True) or {}
+    lane = data.get("lane")
+    if lane is not None:
+        try:
+            lane = max(0, int(lane))
+        except (TypeError, ValueError):
+            return jsonify({"error": "lane must be an integer or null"}), 400
+    # Only period bars are laned; ignore pins on points but don't error.
+    if event["type"] == "period":
+        db.set_event_lane(event_id, lane)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/timeline/<int:timeline_id>/lanes/reset", methods=["POST"])
+def reset_lanes(timeline_id):
+    if not db.get_timeline(timeline_id):
+        return jsonify({"error": "Not found"}), 404
+    db.clear_lanes(timeline_id)
     return jsonify({"ok": True})
 
 
