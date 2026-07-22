@@ -20,6 +20,7 @@ const AXIS_RATIO      = 0.40;   // center line at 40% of container height
 const PERIOD_H        = 24;     // period bar height
 const PERIOD_GAP      = 5;      // vertical gap between period lanes
 const PERIOD_OFFSET   = 38;     // gap between axis and first period lane
+const ONGOING_ARROW   = 11;     // arrow length past the end of an ongoing bar
 const SVGNS           = 'http://www.w3.org/2000/svg';
 
 // Point-label layout
@@ -36,6 +37,18 @@ function dms(dateStr) {
 }
 function msToX(ms)  { return (ms - viewStartMs) / DAY_MS * pxPerDay; }
 function xToMs(x)   { return viewStartMs + x / pxPerDay * DAY_MS; }
+
+// Midnight UTC today — where an ongoing period's bar is drawn up to.
+function todayMs() {
+  const n = new Date();
+  return Date.UTC(n.getFullYear(), n.getMonth(), n.getDate());
+}
+
+// The date a period visually ends at. Ongoing periods run to today.
+function eventEndMs(e) {
+  if (e.ongoing) return todayMs();
+  return dms(e.end_date);
+}
 
 // ── SVG helpers ────────────────────────────────────────────────────────────
 function mkEl(tag, attrs) {
@@ -131,7 +144,8 @@ function assignLanes(periods) {
   const laneEnds = [];
   return sorted.map(e => {
     const s = dms(e.start_date);
-    const end = dms(e.end_date);
+    // An ongoing period never frees its lane — nothing may follow it there.
+    const end = e.ongoing ? Infinity : dms(e.end_date);
     const gap = 4 * DAY_MS;
     let lane = laneEnds.findIndex(t => t + gap <= s);
     if (lane === -1) { lane = laneEnds.length; laneEnds.push(end); }
@@ -255,7 +269,7 @@ function render() {
 
   for (const e of periods) {
     const x1 = msToX(dms(e.start_date));
-    const x2 = msToX(dms(e.end_date));
+    const x2 = msToX(eventEndMs(e));
     if (x2 < -20 || x1 > W + 20) continue;
 
     const barY = axisY + PERIOD_OFFSET + e.lane * (PERIOD_H + PERIOD_GAP);
@@ -269,6 +283,17 @@ function render() {
       x:cx1, y:barY, width:w, height:PERIOD_H,
       rx:'4', fill:e.color, opacity:'0.92'
     }));
+
+    // Ongoing periods get an arrow past "today" so the bar doesn't read as a
+    // hard end. Only drawn when the real end is actually on screen.
+    if (e.ongoing && cx2 < W + 4) {
+      const tip = cx2 + ONGOING_ARROW;
+      const midY = barY + PERIOD_H / 2;
+      g.appendChild(mkEl('polygon', {
+        points: `${cx2},${barY + 3} ${tip},${midY} ${cx2},${barY + PERIOD_H - 3}`,
+        fill: e.color, opacity: '0.92'
+      }));
+    }
     if (w > 36) {
       const labelX = Math.max(cx1 + 7, 7);
       g.appendChild(mkTxt(e.title, {
@@ -378,7 +403,7 @@ function fitView() {
     return;
   }
   const dates = allEvents.flatMap(e =>
-    [dms(e.start_date), ...(e.end_date ? [dms(e.end_date)] : [])]
+    [dms(e.start_date), ...(e.type === 'period' ? [eventEndMs(e)] : [])]
   );
   const minMs = Math.min(...dates);
   const maxMs = Math.max(...dates);
@@ -465,7 +490,9 @@ function openInfoBubble(id, svgX, svgY) {
   document.getElementById('info-desc').textContent = e.description || '';
 
   const dateEl = document.getElementById('info-date');
-  if (e.type === 'period' && e.end_date) {
+  if (e.type === 'period' && e.ongoing) {
+    dateEl.textContent = `${formatDate(e.start_date)} – Present`;
+  } else if (e.type === 'period' && e.end_date) {
     dateEl.textContent = `${formatDate(e.start_date)} – ${formatDate(e.end_date)}`;
   } else {
     dateEl.textContent = formatDate(e.start_date);
@@ -511,6 +538,7 @@ function openAddPanel() {
   document.getElementById('f-desc').value  = '';
   document.getElementById('f-start').value = '';
   document.getElementById('f-end').value   = '';
+  setOngoing(false);
   setColorValue(lastUsedColor);
   setEventType('point');
   clearPanelError();
@@ -530,6 +558,8 @@ function openEditPanel(id) {
   document.getElementById('f-end').value   = e.end_date || '';
   setColorValue(e.color || '#1d4ed8');
   setEventType(e.type);
+  // After setEventType, which clears the flag for point events.
+  setOngoing(!!e.ongoing);
   clearPanelError();
   document.getElementById('event-panel').classList.add('open');
 }
@@ -545,6 +575,15 @@ function setEventType(type) {
   document.getElementById('btn-point').classList.toggle('active', type === 'point');
   document.getElementById('btn-period').classList.toggle('active', type === 'period');
   document.getElementById('end-date-row').style.display = type === 'period' ? 'block' : 'none';
+  // "Ongoing" is meaningless for a point event.
+  if (type === 'point') setOngoing(false);
+}
+
+function setOngoing(on) {
+  document.getElementById('f-ongoing').checked = on;
+  const end = document.getElementById('f-end');
+  end.disabled = on;
+  if (on) end.value = '';
 }
 
 function setColorValue(hex) {
@@ -571,15 +610,18 @@ async function saveEvent() {
   const description = document.getElementById('f-desc').value.trim();
   const color       = document.getElementById('f-color').value;
   const start_date  = document.getElementById('f-start').value;
-  const end_date    = document.getElementById('f-end').value || null;
   const type        = currentEventType;
+  const ongoing     = type === 'period' && document.getElementById('f-ongoing').checked;
+  const end_date    = ongoing ? null : (document.getElementById('f-end').value || null);
 
   if (!title)      { showPanelError('Title is required.'); return; }
   if (!start_date) { showPanelError('Start date is required.'); return; }
-  if (type === 'period' && !end_date)          { showPanelError('End date is required for period events.'); return; }
-  if (type === 'period' && end_date < start_date) { showPanelError('End date must be on or after start date.'); return; }
+  if (type === 'period' && !ongoing) {
+    if (!end_date)                { showPanelError('End date is required, or mark the event ongoing.'); return; }
+    if (end_date < start_date)    { showPanelError('End date must be on or after start date.'); return; }
+  }
 
-  const body = { title, description, type, start_date, end_date, color };
+  const body = { title, description, type, start_date, end_date, color, ongoing };
   let res;
   if (currentEventId === null) {
     res = await fetch(`/api/timeline/${TIMELINE_ID}/events`, {

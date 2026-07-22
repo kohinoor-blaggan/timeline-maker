@@ -101,6 +101,33 @@
     margin-right: .3rem;
   }
 
+  /* "Ongoing" checkbox under the end-date field */
+  .ongoing-row {
+    display: flex;
+    align-items: center;
+    gap: .45rem;
+    margin-top: .4rem;
+    font-size: .85rem;
+    color: #475569;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .ongoing-row input {
+    width: auto;
+    margin: 0;
+    flex-shrink: 0;
+  }
+  .ongoing-row small {
+    color: #94a3b8;
+    font-weight: 400;
+  }
+  /* Greyed out but still visible, so it's clear why the field is inactive */
+  #f-end:disabled {
+    background: #f1f5f9;
+    color: #94a3b8;
+    cursor: not-allowed;
+  }
+
   /* Toolbar button styles */
   .toolbar-btn {
     font-size: .78rem;
@@ -297,6 +324,10 @@
       <label style="display:block">
         <span style="font-size:.85rem; color:#475569; font-weight:600">End Date</span>
         <input type="date" id="f-end" style="margin-top:.25rem">
+      </label>
+      <label class="ongoing-row">
+        <input type="checkbox" id="f-ongoing" onchange="setOngoing(this.checked)">
+        <span>Ongoing <small>— no end date, runs to the present</small></span>
       </label>
     </div>
 

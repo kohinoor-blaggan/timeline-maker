@@ -60,6 +60,19 @@ def delete_timeline(timeline_id):
     return jsonify({"ok": True})
 
 
+def _validate_event(title, start_date, etype, end_date, ongoing):
+    """Returns an error message, or None when the event is valid."""
+    if not title or not start_date or etype not in ("point", "period"):
+        return "title, start_date and valid type are required"
+    if etype == "period":
+        # An ongoing period has no end date by definition.
+        if not ongoing and not end_date:
+            return "end_date is required for period events"
+        if not ongoing and end_date < start_date:
+            return "end_date must be on or after start_date"
+    return None
+
+
 @app.route("/api/timeline/<int:timeline_id>/events")
 def get_events(timeline_id):
     if not db.get_timeline(timeline_id):
@@ -78,13 +91,15 @@ def create_event(timeline_id):
     end_date = data.get("end_date") or None
     color = data.get("color", "#1d4ed8")
     description = data.get("description", "")
+    ongoing = 1 if (data.get("ongoing") and etype == "period") else 0
 
-    if not title or not start_date or etype not in ("point", "period"):
-        return jsonify({"error": "title, start_date and valid type are required"}), 400
-    if etype == "period" and not end_date:
-        return jsonify({"error": "end_date is required for period events"}), 400
+    err = _validate_event(title, start_date, etype, end_date, ongoing)
+    if err:
+        return jsonify({"error": err}), 400
+    if ongoing:
+        end_date = None
 
-    eid = db.create_event(timeline_id, title, description, etype, start_date, end_date, color)
+    eid = db.create_event(timeline_id, title, description, etype, start_date, end_date, color, ongoing)
     return jsonify({"ok": True, "id": eid}), 201
 
 
@@ -99,13 +114,15 @@ def update_event(event_id):
     end_date = data.get("end_date") or None
     color = data.get("color", "#1d4ed8")
     description = data.get("description", "")
+    ongoing = 1 if (data.get("ongoing") and etype == "period") else 0
 
-    if not title or not start_date or etype not in ("point", "period"):
-        return jsonify({"error": "title, start_date and valid type are required"}), 400
-    if etype == "period" and not end_date:
-        return jsonify({"error": "end_date is required for period events"}), 400
+    err = _validate_event(title, start_date, etype, end_date, ongoing)
+    if err:
+        return jsonify({"error": err}), 400
+    if ongoing:
+        end_date = None
 
-    db.update_event(event_id, title, description, etype, start_date, end_date, color)
+    db.update_event(event_id, title, description, etype, start_date, end_date, color, ongoing)
     return jsonify({"ok": True})
 
 
